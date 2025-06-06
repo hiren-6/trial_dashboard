@@ -1,5 +1,3 @@
-# app.py
-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -37,12 +35,11 @@ def load_uploaded(uploaded_file):
 
 
 def preprocess_dates_and_durations(df):
-    """Ensure the three date columns are datetimes, then compute durations (in months)."""
+    """Ensure date columns are datetimes, then compute durations (in months)."""
     df = df.copy()
     for col in ["Start Date", "Primary Completion Date", "Completion Date"]:
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
-    # Compute durations (days ÷ 30 for an approximate month‐count).
     df["Duration Overall (Months)"] = (
         (df["Completion Date"] - df["Start Date"]).dt.days.astype("float") / 30.0
     )
@@ -67,7 +64,7 @@ def extract_country_counts(loc_series):
                 country = part.strip()
             all_countries.append(country)
 
-    if len(all_countries) == 0:
+    if not all_countries:
         return pd.DataFrame(columns=["country", "iso_alpha3", "count"])
 
     counts = pd.Series(all_countries).value_counts().reset_index()
@@ -82,6 +79,21 @@ def extract_country_counts(loc_series):
     counts["iso_alpha3"] = counts["country"].apply(to_iso)
     counts = counts.dropna(subset=["iso_alpha3"]).copy()
     return counts
+
+
+def months_to_yr_mo_string(m):
+    """Convert a float number of months to a string like '2 yr 3 mo' or '5 mo'."""
+    if pd.isna(m) or m < 0:
+        return "-"
+    total_months = int(round(m))
+    yrs = total_months // 12
+    mos = total_months % 12
+    if yrs > 0 and mos > 0:
+        return f"{yrs} yr {mos} mo"
+    elif yrs > 0:
+        return f"{yrs} yr"
+    else:
+        return f"{mos} mo"
 
 
 def main():
@@ -198,13 +210,18 @@ def main():
     # ——— Timelines page ———
     else:  # page == "Timelines"
         st.title("⏱ Timeline Dashboard")
-        st.markdown("Compare trial durations (overall vs. primary completion). Filter by **Funder Type**.")
+        st.markdown("Compare average trial durations (overall vs. primary completion). Filter by **Funder Type**.")
 
-        # Filter by Funder Type
-        funders = sorted(df_processed["Funder Type"].dropna().unique())
-        selected_funders = st.sidebar.multiselect("Filter: Funder Type", funders, default=funders)
+        # Filter by Funder Type: Industry vs Academic vs Both
+        funder_option = st.sidebar.radio("Funder Type", ("Both", "Industry Only", "Academic Only"))
+        if funder_option == "Industry Only":
+            df_time = df_processed[df_processed["Funder Type"].str.contains("Industry", na=False)].copy()
+        elif funder_option == "Academic Only":
+            df_time = df_processed[df_processed["Funder Type"].str.contains("Academic", na=False)].copy()
+        else:
+            df_time = df_processed.copy()
 
-        df_time = df_processed[df_processed["Funder Type"].isin(selected_funders)].copy()
+        # Drop rows with missing/negative durations
         df_time = df_time[
             df_time["Duration Overall (Months)"].notna()
             & (df_time["Duration Overall (Months)"] >= 0)
@@ -216,69 +233,73 @@ def main():
             st.warning("No trials match the selected Funder Type or durations are missing/invalid.")
             st.stop()
 
-        # Create a short label for each trial
-        df_time["Trial Label"] = (
-            df_time["NCT Number"].astype(str) + ": " + df_time["Study Title"].str.slice(0, 50) + "…"
+        # Group by Phase and compute average durations
+        agg = (
+            df_time.groupby("Phases")
+            .agg(
+                avg_overall_months=("Duration Overall (Months)", "mean"),
+                avg_primary_months=("Duration Primary (Months)", "mean"),
+            )
+            .reset_index()
         )
-        df_time = df_time.sort_values("Start Date")
 
-        # Overall Duration Chart
+        # If Phases have numeric component like "Phase 1", extract number for sorting
+        try:
+            agg["phase_num"] = agg["Phases"].str.extract(r"(\d+)").astype(int)
+            agg = agg.sort_values("phase_num")
+        except Exception:
+            agg = agg.sort_values("Phases")
+
+        # Convert to display-friendly strings
+        agg["Overall Text"] = agg["avg_overall_months"].apply(months_to_yr_mo_string)
+        agg["Primary Text"] = agg["avg_primary_months"].apply(months_to_yr_mo_string)
+
+        # Prepare two side-by-side columns for the charts
+        col1, col2 = st.columns(2)
+
+        # Overall Duration Bar Chart
         fig_overall = px.bar(
-            df_time,
-            x="Duration Overall (Months)",
-            y="Trial Label",
+            agg,
+            x="avg_overall_months",
+            y="Phases",
             orientation="h",
-            color="Phases",
-            hover_data={
-                "Start Date": True,
-                "Completion Date": True,
-                "Duration Overall (Months)": ":.1f",
-                "Phases": True,
-            },
-            height=600,
-            title="📊 Overall Trial Duration (Start → Completion) in Months",
+            text="Overall Text",
+            labels={"avg_overall_months": "Avg Duration (Months)", "Phases": "Phase"},
+            title="📊 Avg Overall Duration by Phase",
         )
+        fig_overall.update_traces(textposition="outside")
         fig_overall.update_layout(
-            yaxis={"categoryorder": "array", "categoryarray": df_time["Trial Label"]},
-            margin=dict(l=300, r=20, t=50, b=20),
-            legend_title_text="Phase",
-            xaxis_title="Duration (Months)",
-            yaxis_title="Trial",
+            margin=dict(l=100, r=20, t=50, b=20),
+            yaxis={"categoryorder": "array", "categoryarray": agg["Phases"]},
         )
 
-        # Primary Completion Duration Chart
+        # Primary Completion Duration Bar Chart
         fig_primary = px.bar(
-            df_time,
-            x="Duration Primary (Months)",
-            y="Trial Label",
+            agg,
+            x="avg_primary_months",
+            y="Phases",
             orientation="h",
-            color="Phases",
-            hover_data={
-                "Start Date": True,
-                "Primary Completion Date": True,
-                "Duration Primary (Months)": ":.1f",
-                "Phases": True,
-            },
-            height=600,
-            title="📈 Primary Completion Duration (Start → Primary Completion) in Months",
+            text="Primary Text",
+            labels={"avg_primary_months": "Avg Duration (Months)", "Phases": "Phase"},
+            title="📈 Avg Primary Completion Duration by Phase",
         )
+        fig_primary.update_traces(textposition="outside")
         fig_primary.update_layout(
-            yaxis={"categoryorder": "array", "categoryarray": df_time["Trial Label"]},
-            margin=dict(l=300, r=20, t=50, b=20),
-            legend_title_text="Phase",
-            xaxis_title="Duration (Months)",
-            yaxis_title="Trial",
+            margin=dict(l=100, r=20, t=50, b=20),
+            yaxis={"categoryorder": "array", "categoryarray": agg["Phases"]},
         )
 
-        st.plotly_chart(fig_overall, use_container_width=True)
-        st.plotly_chart(fig_primary, use_container_width=True)
+        # Display both charts side by side, fitting in the visible screen
+        with col1:
+            st.plotly_chart(fig_overall, use_container_width=True, height=500)
+        with col2:
+            st.plotly_chart(fig_primary, use_container_width=True, height=500)
 
         st.markdown(
             """
-            - **Duration Overall** = `Completion Date – Start Date` (converted to months).  
-            - **Duration Primary** = `Primary Completion Date – Start Date` (converted to months).  
-            - Bars are colored by `Phases`.  
-            - Hover on a bar for exact dates and duration.  
+            - Bars show **average** duration (in months) for each Phase.  
+            - Text labels on each bar display the duration as “X yr Y mo” (or “Y mo”).  
+            - Use the **Funder Type** toggle (sidebar) to switch between Industry, Academic, or Both.  
             """
         )
 
