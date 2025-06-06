@@ -1,3 +1,5 @@
+# app.py
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -192,7 +194,7 @@ def main():
     page = st.sidebar.radio("2) Navigate to", ("Home", "Geography", "Timelines"))
 
     # -----------------
-    # Home Page (unchanged)
+    # Home Page
     # -----------------
     if page == "Home":
         st.title("🏠 Clinical Trials Dashboard")
@@ -224,13 +226,13 @@ def main():
         st.dataframe(df_processed.head(10), use_container_width=True)
 
     # -------------------
-    # Geography Page (unchanged except for minor formatting)
+    # Geography Page
     # -------------------
     elif page == "Geography":
-        st.title("🌍 Geography Dashboard (City‐Level Hotspots)")
+        st.title("🌍 Trial Hotspot (City Wise)")
         st.markdown("An interactive hex‐bin map showing trial hotspots by city. Filter by **Study Status**.")
 
-        # Filter by Study Status
+        # Sidebar filter: Study Status
         statuses = sorted(df_processed["Study Status"].dropna().unique())
         selected_status = st.sidebar.multiselect("Filter: Study Status", statuses, default=statuses)
 
@@ -294,15 +296,13 @@ def main():
 
         st.markdown(
             """
-            - **HexagonLayer** groups nearby trial points into hex bins.  
-            - Taller/darker hexagons = more trials in that area.  
-            - Hover on a hex to see count.  
-            - If city‐level geocoding fails, we fall back to a country‐level choropleth.  
+            - The taller/darker a hexagon, the more trials in that area.  
+            - If city‐level geocoding fails, a fallback country‐level choropleth is shown.  
             """
         )
 
     # -------------------
-    # Timelines Page (UPDATED to match your mock‐up exactly)
+    # Timelines Page (REVISED)
     # -------------------
     else:  # page == "Timelines"
         # ——— Colored Top Banner ———
@@ -319,7 +319,7 @@ def main():
                     text-align: center;
                     font-family: 'Helvetica Neue', Arial, sans-serif;
                 ">
-                    Study Timeline Dashboard
+                    Trial Timeline Dashboard
                 </h2>
             </div>
             """,
@@ -341,34 +341,16 @@ def main():
             unsafe_allow_html=True,
         )
 
-        # ——— Funder Type Toggle (as a horizontal radio) ———
-        st.markdown(
-            "<div style='display: flex; align-items: center; margin-bottom: 10px;'>"
-            "<span style='font-weight: 600; margin-right: 10px; font-size: 16px;'>Industry</span>"
-            "<div style='flex: 1;'>"
-            f"{st.radio('', ['Industry', 'Academic'], index=0, horizontal=True)}"
-            "</div>"
-            "<span style='font-weight: 600; margin-left: 10px; font-size: 16px;'>Academic</span>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
+        # ——— Funder Type Toggle (Radio) ———
+        funder_selected = st.radio("Funder Type", ["Industry", "Academic"], index=0, horizontal=True)
 
-        # Read which option is selected
-        # (We gave the radio an empty label so that it renders inline; 
-        #  the actual returned value is the selected string.)
-        funder_selected = st.session_state.get(st.radio.__name__, "Industry")
-        # Above: Because we inserted the radio inline, we pulled the result directly from session_state.
-        # Alternatively, you could do:
-        #   funder_selected = st.radio("Funder Type", ["Industry", "Academic"], horizontal=True)
-        # but it will render slightly differently. The above approach more closely mimics a toggle.
-
-        # Filter the data by Funder Type
+        # Filter data
         if funder_selected == "Industry":
             df_time = df_processed[df_processed["Funder Type"].str.contains("Industry", na=False)].copy()
         else:
             df_time = df_processed[df_processed["Funder Type"].str.contains("Academic", na=False)].copy()
 
-        # Drop any invalid durations
+        # Drop invalid durations
         df_time = df_time[
             df_time["Duration Overall (Months)"].notna()
             & (df_time["Duration Overall (Months)"] >= 0)
@@ -390,10 +372,10 @@ def main():
             .reset_index()
         )
 
-        # Try to sort phases numerically if they follow “Phase 1”, “Phase 2”, etc.
+        # Sort so that Phase 3 is on top, then Phase 2, then Phase 1
         try:
             agg["phase_num"] = agg["Phases"].str.extract(r"(\d+)").astype(int)
-            agg = agg.sort_values("phase_num", ascending=False)  # descending so Phase 3 is on top
+            agg = agg.sort_values("phase_num", ascending=False)
         except Exception:
             agg = agg.sort_values("Phases", ascending=False)
 
@@ -401,12 +383,12 @@ def main():
         agg["Primary Label"] = agg["avg_primary_months"].round(0).astype(int).astype(str) + " months"
         agg["Overall Label"] = agg["avg_overall_months"].round(0).astype(int).astype(str) + " months"
 
-        # Determine a common x‐axis range across both charts
+        # Determine a common x‐axis max so both charts are comparable
         max_primary = agg["avg_primary_months"].max()
         max_overall = agg["avg_overall_months"].max()
-        common_x_max = max(max_primary, max_overall) * 1.1  # multiply by 1.1 for some headroom
+        common_x_max = max(max_primary, max_overall) * 1.1  # 10% headroom
 
-        # Build two side‐by‐side columns so charts fit in one screen
+        # Two side‐by‐side columns
         col1, col2 = st.columns(2)
 
         # —— Left: Mean Study Primary Duration ——
@@ -423,9 +405,7 @@ def main():
                 text="Primary Label",
                 labels={"avg_primary_months": "", "Phases": ""},
             )
-            # Put labels outside
             fig_primary.update_traces(textposition="outside", marker_color="#0E4D64")
-            # Hide x‐axis tick labels & grid lines
             fig_primary.update_xaxes(
                 range=[0, common_x_max],
                 showticklabels=False,
@@ -466,7 +446,12 @@ def main():
                 showgrid=False,
                 zeroline=False,
             )
-            fig_overall.update_yaxes(visible=False)  # hide y‐axis on the right chart
+            # Show Phase labels on the right chart as well
+            fig_overall.update_yaxes(
+                categoryorder="array",
+                categoryarray=agg["Phases"].tolist(),
+                showgrid=False,
+            )
             fig_overall.update_layout(
                 margin=dict(l=20, r=20, t=0, b=20),
                 plot_bgcolor="white",
@@ -475,7 +460,7 @@ def main():
             )
             st.plotly_chart(fig_overall, use_container_width=True)
 
-        # —— Below Charts: Explanatory Bullets ——
+        # —— Below charts: explanatory bullets ——
         st.markdown(
             """
             <ul style="font-family: Arial, sans-serif; font-size: 14px;">
