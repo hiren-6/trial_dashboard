@@ -44,13 +44,6 @@ def load_uploaded(uploaded_file):
 # -------------------------------------------
 # 2) PREPROCESS & HELPER FUNCTIONS
 # -------------------------------------------
-def preprocess_for_geography(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    For the Geography page, we assume columns like 'Study Status' etc. are present by name.
-    We simply return the DataFrame as‐is, since the existing geography logic uses named columns.
-    """
-    return df.copy()
-
 
 def extract_country_counts(loc_series: pd.Series) -> pd.DataFrame:
     """
@@ -161,7 +154,7 @@ def compute_timeline_averages(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFr
     df_tl = df.copy()
 
     # 1) Extract the positional columns into named columns
-    df_tl["Phase"] = df_tl.iloc[:, 16]
+    df_tl["Phases"] = df_tl.iloc[:, 16]
     df_tl["Funder"] = df_tl.iloc[:, 18]
     df_tl["Start"] = pd.to_datetime(df_tl.iloc[:, 22], errors="coerce")
     df_tl["Completion"] = pd.to_datetime(df_tl.iloc[:, 23], errors="coerce")
@@ -171,7 +164,7 @@ def compute_timeline_averages(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFr
     df_tl["DurOverall"] = (df_tl["Completion"] - df_tl["Start"]).dt.days.astype("float") / 30.0
     df_tl["DurPrimary"] = (df_tl["Primary"] - df_tl["Start"]).dt.days.astype("float") / 30.0
 
-    # 3) Drop rows where Durations are missing or negative
+    # 3) Drop rows where durations are missing or negative
     df_tl = df_tl[
         df_tl["DurOverall"].notna()
         & (df_tl["DurOverall"] >= 0)
@@ -186,7 +179,7 @@ def compute_timeline_averages(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFr
             return pd.DataFrame(columns=["Phases", "avg_primary_months", "avg_overall_months"])
 
         agg = (
-            sub.groupby("Phase")
+            sub.groupby("Phases")
             .agg(
                 avg_primary_months=("DurPrimary", "mean"),
                 avg_overall_months=("DurOverall", "mean"),
@@ -194,11 +187,15 @@ def compute_timeline_averages(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFr
             .reset_index()
         )
 
-        # Ensure we cover all phases present in the entire dataset (fill zeros if absent)
-        all_phases = sorted(df_tl["Phase"].dropna().unique(), key=lambda x: int("".join(filter(str.isdigit, str(x))) or 0))
-        # Reindex to ensure every phase appears
-        agg = agg.set_index("Phase").reindex(all_phases, fill_value=0).reset_index()
+        # Ensure we cover all phases present in the entire dataset
+        all_phases = sorted(
+            df_tl["Phases"].dropna().unique(),
+            key=lambda x: int("".join(filter(str.isdigit, str(x))) or 0),
+            reverse=False,  # will sort ascending, e.g. Phase 1, Phase 2, Phase 3
+        )
 
+        # Reindex so every phase appears (fill missing with 0)
+        agg = agg.set_index("Phases").reindex(all_phases, fill_value=0).reset_index()
         return agg
 
     avg_academic = avg_by_funder("Academic")
@@ -226,7 +223,7 @@ def main():
             st.info("Please upload a valid CSV or Excel to proceed.")
             st.stop()
 
-    # 2) Required-column check (these named columns are needed for Geography)
+    # 2) Required-column check (for Geography)
     required_cols_geo = [
         "Study Status",
         "Location",
@@ -245,7 +242,7 @@ def main():
     page = st.sidebar.radio("2) Navigate to", ("Home", "Geography", "Timelines"))
 
     # -----------------
-    # Home Page (unchanged)
+    # Home Page
     # -----------------
     if page == "Home":
         st.title("🏠 Clinical Trials Dashboard")
@@ -276,23 +273,25 @@ def main():
         st.subheader("Preview of Your Data (first 10 rows)")
         st.dataframe(df.head(10), use_container_width=True)
 
+    # -------------------
     # Geography Page
+    # -------------------
     elif page == "Geography":
         st.title("🌍 Trial Hotspot (City Wise)")
         st.markdown("An interactive hex‐bin map showing trial hotspots by city. Filter by **Study Status**.")
-    
+
         # Sidebar filter: Study Status
         statuses = sorted(df["Study Status"].dropna().unique())
         selected_status = st.sidebar.multiselect("Filter: Study Status", statuses, default=statuses)
-    
+
         df_geo = df[df["Study Status"].isin(selected_status)].copy()
         if df_geo.shape[0] == 0:
             st.warning("No trials match the selected Study Status. Adjust filter.")
             st.stop()
-    
+
         with st.spinner("Geocoding cities…first run may take time (1 s per city)…"):
             city_df = build_city_hotspots(df_geo)
-    
+
         if city_df.empty:
             st.warning("No city‐level coordinates could be extracted/geocoded.")
             st.info("Showing fallback country‐level choropleth instead.")
@@ -300,7 +299,7 @@ def main():
             if country_counts.empty:
                 st.error("Country extraction failed; check your `Location` format.")
                 st.stop()
-    
+
             fig = px.choropleth(
                 country_counts,
                 locations="iso_alpha3",
@@ -314,11 +313,11 @@ def main():
             fig.update_layout(margin=dict(l=0, r=0, t=50, b=0), coloraxis_colorbar=dict(title="Trials"))
             st.plotly_chart(fig, use_container_width=True)
             return
-    
+
         # Compute map center
         mid_lat = city_df["lat"].mean() if not city_df["lat"].isna().all() else 0
         mid_lon = city_df["lon"].mean() if not city_df["lon"].isna().all() else 0
-    
+
         # HexagonLayer (for hotspot bins)
         hex_layer = pdk.Layer(
             "HexagonLayer",
@@ -331,7 +330,7 @@ def main():
             extruded=True,
             coverage=0.8,
         )
-    
+
         # ScatterplotLayer (small red dots) so we can show city names on hover
         scatter_layer = pdk.Layer(
             "ScatterplotLayer",
@@ -341,10 +340,10 @@ def main():
             get_fill_color=[220, 20, 60, 180],  # crimson with some transparency
             pickable=True,
         )
-    
+
         view_state = pdk.ViewState(latitude=mid_lat, longitude=mid_lon, zoom=1.5, bearing=0, pitch=40)
-    
-        # Tooltip: use {elevationValue} for hex, {city_country} for scatter
+
+        # Tooltip: {city_country} for dots, {elevationValue} for hexes
         tooltip = {
             "html": """
               <div>
@@ -354,19 +353,19 @@ def main():
             """,
             "style": {"backgroundColor": "white", "color": "black", "font-size": "12px", "padding": "5px"},
         }
-    
+
         deck = pdk.Deck(
             layers=[hex_layer, scatter_layer],
             initial_view_state=view_state,
             tooltip=tooltip,
             map_style="mapbox://styles/mapbox/light-v10",
         )
-    
+
         st.pydeck_chart(deck)
-    
+
         st.markdown(
             """
-            - **Red dots:** Hover to see the exact city name (`City, Country`).
+            - **Red dots:** Hover to see the exact city name (`City, Country`).  
             - **Hexagons:** Hover to see how many trials fall into that hex‐bin.  
             - If city‐level geocoding fails, a fallback country‐level choropleth is shown.  
             """
@@ -415,7 +414,7 @@ def main():
         # ——— Funder Type Toggle (Radio) ———
         funder_selected = st.radio("Funder Type", ["Industry", "Academic"], index=0, horizontal=True)
 
-        # Choose the precomputed DataFrame based on toggle
+        # Choose the correct precomputed DataFrame
         if funder_selected == "Industry":
             agg = avg_industry.copy()
         else:
@@ -434,7 +433,7 @@ def main():
         max_overall = agg["avg_overall_months"].max()
         common_x_max = max(max_primary, max_overall) * 1.1  # 10% headroom
 
-        # Sort so that highest Phase number is on top (e.g. Phase 3 → Phase 1)
+        # Sort so that Phase 3 is on top, then Phase 2, then Phase 1
         try:
             agg["phase_num"] = agg["Phases"].astype(str).str.extract(r"(\d+)").astype(int)
             agg = agg.sort_values("phase_num", ascending=False)
