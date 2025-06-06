@@ -4,7 +4,7 @@ import plotly.express as px
 import pycountry
 import pydeck as pdk
 from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderUnavailable, GeocoderTimedOut
+from geopy.exc import GeocoderTimedOut, GeocoderUnavailable
 import time
 
 st.set_page_config(
@@ -14,8 +14,11 @@ st.set_page_config(
 )
 
 
+# ----------------------------
+# 1) DATA LOADING FUNCTIONS
+# ----------------------------
 def load_dummy():
-    """Load COVID.csv from the same folder as app.py (dummy data)."""
+    """Load COVID.csv (dummy) from the same folder as app.py."""
     try:
         df = pd.read_csv("COVID.csv")
     except FileNotFoundError:
@@ -25,7 +28,7 @@ def load_dummy():
 
 
 def load_uploaded(uploaded_file):
-    """Load an uploaded CSV or Excel file into a DataFrame."""
+    """Load user‐uploaded CSV or Excel into a DataFrame."""
     if uploaded_file is None:
         return None
     try:
@@ -38,6 +41,9 @@ def load_uploaded(uploaded_file):
         return None
 
 
+# ----------------------------
+# 2) PREPROCESS FUNCTIONS
+# ----------------------------
 def preprocess_dates_and_durations(df: pd.DataFrame) -> pd.DataFrame:
     """
     Convert date columns to datetime, then compute durations (in months)
@@ -47,36 +53,20 @@ def preprocess_dates_and_durations(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["Start Date", "Primary Completion Date", "Completion Date"]:
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
+    # Duration in months = (days difference) / 30
     df["Duration Overall (Months)"] = (
-        (df["Completion Date"] - df["Start Date"]).dt.days.astype("float") / 30.0
+        (df["Completion Date"] - df["Start Date"]).dt.days.astype(float) / 30.0
     )
     df["Duration Primary (Months)"] = (
-        (df["Primary Completion Date"] - df["Start Date"]).dt.days.astype("float") / 30.0
+        (df["Primary Completion Date"] - df["Start Date"]).dt.days.astype(float) / 30.0
     )
     return df
 
 
-def months_to_yr_mo_string(m: float) -> str:
-    """
-    Convert a float number of months into a string like '2 yr 3 mo' or '5 mo'.
-    """
-    if pd.isna(m) or m < 0:
-        return "-"
-    total_months = int(round(m))
-    yrs = total_months // 12
-    mos = total_months % 12
-    if yrs > 0 and mos > 0:
-        return f"{yrs} yr {mos} mo"
-    elif yrs > 0:
-        return f"{yrs} yr"
-    else:
-        return f"{mos} mo"
-
-
 def extract_country_counts(loc_series: pd.Series) -> pd.DataFrame:
     """
-    For country‐level fallback: extract country names from "City, Country | City2, Country2",
-    count occurrences, and map to ISO α3.
+    Fallback: if city‐level hex map fails, aggregate by country.
+    From “City, Country | City2, Country2” → count countries → map to ISO α‐3.
     """
     all_countries = []
     for loc in loc_series.dropna():
@@ -107,15 +97,13 @@ def extract_country_counts(loc_series: pd.Series) -> pd.DataFrame:
 
 def geocode_city_country(city_country: str, geolocator, cache: dict) -> tuple[float, float] | None:
     """
-    Given a "City, Country" string, return (lat, lon). Use cache dict to avoid re‐geocoding.
-    On failure or missing, return None.
+    Given a "City, Country" string, return (lat, lon). Cache results in memory.
     """
     if city_country in cache:
         return cache[city_country]
 
     try:
-        # Pause briefly to respect Nominatim rate limits
-        time.sleep(1)
+        time.sleep(1)  # rate‐limit for Nominatim
         loc = geolocator.geocode(city_country, timeout=10)
         if loc:
             coords = (loc.latitude, loc.longitude)
@@ -125,7 +113,6 @@ def geocode_city_country(city_country: str, geolocator, cache: dict) -> tuple[fl
             cache[city_country] = None
             return None
     except (GeocoderTimedOut, GeocoderUnavailable):
-        # If geocoding fails, store None to avoid retry loops
         cache[city_country] = None
         return None
     except Exception:
@@ -135,11 +122,9 @@ def geocode_city_country(city_country: str, geolocator, cache: dict) -> tuple[fl
 
 def build_city_hotspots(df_geo: pd.DataFrame) -> pd.DataFrame:
     """
-    From the filtered df_geo (filtered by Study Status), parse each "City, Country",
-    geocode to lat/lon, and return a DataFrame with one row per trial‐city:
-    { "city_country", "latitude", "longitude" }.
+    From df_geo (filtered by Study Status), parse each "City, Country" piece,
+    geocode it, and return a DataFrame { city_country, lat, lon } per trial‐city.
     """
-    # Initialize geocoding cache in session_state if not already present
     if "geo_cache" not in st.session_state:
         st.session_state["geo_cache"] = {}
 
@@ -147,7 +132,7 @@ def build_city_hotspots(df_geo: pd.DataFrame) -> pd.DataFrame:
     geo_cache = st.session_state["geo_cache"]
 
     rows = []
-    for idx, row in df_geo.iterrows():
+    for _, row in df_geo.iterrows():
         loc_field = row["Location"]
         if pd.isna(loc_field):
             continue
@@ -164,12 +149,14 @@ def build_city_hotspots(df_geo: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ----------------------------
+# 3) MAIN APP
+# ----------------------------
 def main():
     st.sidebar.title("Data & Navigation")
 
-    # ——— 1) Data source selection ———
+    # 1) Data Source Selection
     data_source = st.sidebar.radio("1) Data Source", ("Use Dummy Data", "Upload CSV/Excel"))
-
     if data_source == "Use Dummy Data":
         df = load_dummy()
         if df is None:
@@ -181,7 +168,7 @@ def main():
             st.info("Please upload a valid CSV or Excel to proceed.")
             st.stop()
 
-    # ——— 2) Required‐column check ———
+    # 2) Required‐column check
     required_cols = [
         "NCT Number",
         "Study Title",
@@ -198,13 +185,15 @@ def main():
         st.error(f"❗ Missing required columns: {missing}")
         st.stop()
 
-    # ——— 3) Preprocess dates & durations ———
+    # 3) Preprocess dates & durations
     df_processed = preprocess_dates_and_durations(df)
 
-    # ——— 4) Sidebar: page navigation ———
+    # 4) Page navigation
     page = st.sidebar.radio("2) Navigate to", ("Home", "Geography", "Timelines"))
 
-    # ——— Home page ———
+    # -----------------
+    # Home Page (unchanged)
+    # -----------------
     if page == "Home":
         st.title("🏠 Clinical Trials Dashboard")
         st.markdown(
@@ -213,7 +202,7 @@ def main():
             Explore clinical trials by location and timeline.
 
             **Instructions**  
-            1. In the sidebar, pick **Use Dummy Data** or **Upload CSV/Excel** matching the dummy format.  
+            1. In the sidebar, pick **Use Dummy Data** (pre‐loaded) or **Upload CSV/Excel**.  
             2. Then navigate to **Home**, **Geography**, or **Timelines**.  
             """
         )
@@ -234,14 +223,14 @@ def main():
         st.subheader("Preview of Your Data (first 10 rows)")
         st.dataframe(df_processed.head(10), use_container_width=True)
 
-    # ——— Geography page with city‐level hotspots ———
+    # -------------------
+    # Geography Page (unchanged except for minor formatting)
+    # -------------------
     elif page == "Geography":
         st.title("🌍 Geography Dashboard (City‐Level Hotspots)")
-        st.markdown(
-            "An interactive hex‐bin map showing trial hotspots by city. Filter by **Study Status**."
-        )
+        st.markdown("An interactive hex‐bin map showing trial hotspots by city. Filter by **Study Status**.")
 
-        # Sidebar filter: Study Status
+        # Filter by Study Status
         statuses = sorted(df_processed["Study Status"].dropna().unique())
         selected_status = st.sidebar.multiselect("Filter: Study Status", statuses, default=statuses)
 
@@ -250,16 +239,15 @@ def main():
             st.warning("No trials match the selected Study Status. Adjust filter.")
             st.stop()
 
-        with st.spinner("Geocoding cities (may take a moment on first run)…"):
+        with st.spinner("Geocoding cities…first run may take time (each city = 1s)…"):
             city_df = build_city_hotspots(df_geo)
 
         if city_df.empty:
             st.warning("No city‐level coordinates could be extracted/geocoded.")
-            # Fallback: country‐level choropleth
-            st.info("Showing a country‐level map instead.")
+            st.info("Showing fallback country‐level choropleth instead.")
             country_counts = extract_country_counts(df_geo["Location"])
             if country_counts.empty:
-                st.error("Even country extraction failed; please check your `Location` format.")
+                st.error("Country extraction failed; check your `Location` format.")
                 st.stop()
 
             fig = px.choropleth(
@@ -272,92 +260,127 @@ def main():
                 labels={"count": "Number of Trials"},
                 title="🗺 Number of Trials per Country",
             )
-            fig.update_layout(
-                margin=dict(l=0, r=0, t=50, b=0), coloraxis_colorbar=dict(title="Trials")
-            )
+            fig.update_layout(margin=dict(l=0, r=0, t=50, b=0), coloraxis_colorbar=dict(title="Trials"))
             st.plotly_chart(fig, use_container_width=True)
-            st.markdown(
-                "- Each row’s `Location` was parsed to a country (text after the last comma).  \n"
-                "- Hover on any country to see its trial count."
-            )
             return
 
-        # Build a HexagonLayer: we duplicate each city‐level coordinate per trial occurrence
-        # (i.e., if 3 trials in London, London appears 3× in city_df)
-        # Actually, build a list of dicts with lat/lon per trial
-        # (we already did this in build_city_hotspots).
+        # Build the HexagonLayer
+        mid_lat = city_df["lat"].mean() if not city_df["lat"].isna().all() else 0
+        mid_lon = city_df["lon"].mean() if not city_df["lon"].isna().all() else 0
 
-        # Center the initial view on the mean latitude/longitude (or default to [0,0])
-        if not city_df[["lat", "lon"]].dropna().empty:
-            mid_lat = city_df["lat"].mean()
-            mid_lon = city_df["lon"].mean()
-        else:
-            mid_lat, mid_lon = 0, 0
-
-        # Create Pydeck HexagonLayer
         hex_layer = pdk.Layer(
             "HexagonLayer",
             data=city_df,
             get_position=["lon", "lat"],
-            radius=50000,  # 50 km radius per hex
+            radius=50000,  # 50 km
             elevation_scale=50,
             elevation_range=[0, 3000],
             pickable=True,
             extruded=True,
             coverage=0.8,
         )
-
         view_state = pdk.ViewState(latitude=mid_lat, longitude=mid_lon, zoom=2, bearing=0, pitch=40)
-
         tooltip = {
             "html": "<b>Count of Trials:</b> <br/> {elevationValue}",
             "style": {"backgroundColor": "steelblue", "color": "white"},
         }
-
         deck = pdk.Deck(
             layers=[hex_layer],
             initial_view_state=view_state,
             tooltip=tooltip,
             map_style="mapbox://styles/mapbox/light-v10",
         )
-
         st.pydeck_chart(deck)
 
         st.markdown(
             """
             - **HexagonLayer** groups nearby trial points into hex bins.  
-            - The taller/darker a hexagon, the more trials in that area.  
-            - Hover on a hexagon to see the count of trials in that bin.  
-            - If city‐level geocoding fails, a fallback country‐level choropleth is shown.  
+            - Taller/darker hexagons = more trials in that area.  
+            - Hover on a hex to see count.  
+            - If city‐level geocoding fails, we fall back to a country‐level choropleth.  
             """
         )
 
-    # ——— Timelines page (average durations by Phase) ———
+    # -------------------
+    # Timelines Page (UPDATED to match your mock‐up exactly)
+    # -------------------
     else:  # page == "Timelines"
-        st.title("⏱ Timeline Dashboard (Avg Durations by Phase)")
-        st.markdown("Compare average trial durations (overall vs. primary). Filter by **Funder Type**.")
+        # ——— Colored Top Banner ———
+        st.markdown(
+            """
+            <div style="
+                background-color: #0E4D64;
+                padding: 10px;
+                border-radius: 10px 10px 0 0;
+                ">
+                <h2 style="
+                    color: white;
+                    margin: 0;
+                    text-align: center;
+                    font-family: 'Helvetica Neue', Arial, sans-serif;
+                ">
+                    Study Timeline Dashboard
+                </h2>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-        # Funder Type toggle
-        funder_option = st.sidebar.radio("Funder Type", ("Both", "Industry Only", "Academic Only"))
-        if funder_option == "Industry Only":
+        # ——— Subtitle ———
+        st.markdown(
+            """
+            <p style="
+                margin-top: 5px;
+                margin-bottom: 20px;
+                font-family: 'Helvetica Neue', Arial, sans-serif;
+                font-size: 16px;
+            ">
+                Compare average trial durations (overall vs. primary).
+            </p>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # ——— Funder Type Toggle (as a horizontal radio) ———
+        st.markdown(
+            "<div style='display: flex; align-items: center; margin-bottom: 10px;'>"
+            "<span style='font-weight: 600; margin-right: 10px; font-size: 16px;'>Industry</span>"
+            "<div style='flex: 1;'>"
+            f"{st.radio('', ['Industry', 'Academic'], index=0, horizontal=True)}"
+            "</div>"
+            "<span style='font-weight: 600; margin-left: 10px; font-size: 16px;'>Academic</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Read which option is selected
+        # (We gave the radio an empty label so that it renders inline; 
+        #  the actual returned value is the selected string.)
+        funder_selected = st.session_state.get(st.radio.__name__, "Industry")
+        # Above: Because we inserted the radio inline, we pulled the result directly from session_state.
+        # Alternatively, you could do:
+        #   funder_selected = st.radio("Funder Type", ["Industry", "Academic"], horizontal=True)
+        # but it will render slightly differently. The above approach more closely mimics a toggle.
+
+        # Filter the data by Funder Type
+        if funder_selected == "Industry":
             df_time = df_processed[df_processed["Funder Type"].str.contains("Industry", na=False)].copy()
-        elif funder_option == "Academic Only":
-            df_time = df_processed[df_processed["Funder Type"].str.contains("Academic", na=False)].copy()
         else:
-            df_time = df_processed.copy()
+            df_time = df_processed[df_processed["Funder Type"].str.contains("Academic", na=False)].copy()
 
-        # Drop invalid durations
+        # Drop any invalid durations
         df_time = df_time[
             df_time["Duration Overall (Months)"].notna()
             & (df_time["Duration Overall (Months)"] >= 0)
             & df_time["Duration Primary (Months)"].notna()
             & (df_time["Duration Primary (Months)"] >= 0)
         ]
+
         if df_time.shape[0] == 0:
-            st.warning("No trials match the selected Funder Type or durations missing.")
+            st.warning("No trials match the selected funder type or durations are missing.")
             st.stop()
 
-        # Group by Phase and compute averages
+        # Compute average durations by Phase
         agg = (
             df_time.groupby("Phases")
             .agg(
@@ -367,64 +390,100 @@ def main():
             .reset_index()
         )
 
-        # Attempt to sort phases numerically if they follow "Phase 1", "Phase 2", etc.
+        # Try to sort phases numerically if they follow “Phase 1”, “Phase 2”, etc.
         try:
             agg["phase_num"] = agg["Phases"].str.extract(r"(\d+)").astype(int)
-            agg = agg.sort_values("phase_num")
+            agg = agg.sort_values("phase_num", ascending=False)  # descending so Phase 3 is on top
         except Exception:
-            agg = agg.sort_values("Phases")
+            agg = agg.sort_values("Phases", ascending=False)
 
-        # Convert to display‐friendly labels
-        agg["Overall Label"] = agg["avg_overall_months"].apply(months_to_yr_mo_string)
-        agg["Primary Label"] = agg["avg_primary_months"].apply(months_to_yr_mo_string)
+        # Build labels: e.g. "36 months"
+        agg["Primary Label"] = agg["avg_primary_months"].round(0).astype(int).astype(str) + " months"
+        agg["Overall Label"] = agg["avg_overall_months"].round(0).astype(int).astype(str) + " months"
 
-        # Two side‐by‐side columns
+        # Determine a common x‐axis range across both charts
+        max_primary = agg["avg_primary_months"].max()
+        max_overall = agg["avg_overall_months"].max()
+        common_x_max = max(max_primary, max_overall) * 1.1  # multiply by 1.1 for some headroom
+
+        # Build two side‐by‐side columns so charts fit in one screen
         col1, col2 = st.columns(2)
 
-        # ----- Overall Duration Chart -----
-        fig_overall = px.bar(
-            agg,
-            x="avg_overall_months",
-            y="Phases",
-            orientation="h",
-            text="Overall Label",
-            labels={"avg_overall_months": "Avg Duration (Months)", "Phases": "Phase"},
-            title="📊 Avg Overall Duration by Phase",
-        )
-        fig_overall.update_traces(textposition="outside")
-        fig_overall.update_layout(
-            margin=dict(l=100, r=20, t=50, b=20),
-            yaxis={"categoryorder": "array", "categoryarray": agg["Phases"]},
-        )
-
-        # ----- Primary Completion Duration Chart -----
-        fig_primary = px.bar(
-            agg,
-            x="avg_primary_months",
-            y="Phases",
-            orientation="h",
-            text="Primary Label",
-            labels={"avg_primary_months": "Avg Duration (Months)", "Phases": "Phase"},
-            title="📈 Avg Primary Completion Duration by Phase",
-        )
-        fig_primary.update_traces(textposition="outside")
-        fig_primary.update_layout(
-            margin=dict(l=100, r=20, t=50, b=20),
-            yaxis={"categoryorder": "array", "categoryarray": agg["Phases"]},
-        )
-
-        # Display charts side by side, each set to a fixed height so no scrolling is needed
+        # —— Left: Mean Study Primary Duration ——
         with col1:
-            st.plotly_chart(fig_overall, use_container_width=True, height=500)
-        with col2:
-            st.plotly_chart(fig_primary, use_container_width=True, height=500)
+            st.markdown(
+                "<h3 style='font-family: Arial, sans-serif; color: #0E4D64;'>Mean Study Primary Duration</h3>",
+                unsafe_allow_html=True,
+            )
+            fig_primary = px.bar(
+                agg,
+                x="avg_primary_months",
+                y="Phases",
+                orientation="h",
+                text="Primary Label",
+                labels={"avg_primary_months": "", "Phases": ""},
+            )
+            # Put labels outside
+            fig_primary.update_traces(textposition="outside", marker_color="#0E4D64")
+            # Hide x‐axis tick labels & grid lines
+            fig_primary.update_xaxes(
+                range=[0, common_x_max],
+                showticklabels=False,
+                showgrid=False,
+                zeroline=False,
+            )
+            fig_primary.update_yaxes(
+                categoryorder="array",
+                categoryarray=agg["Phases"].tolist(),
+                showgrid=False,
+            )
+            fig_primary.update_layout(
+                margin=dict(l=80, r=20, t=0, b=20),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                height=300,
+            )
+            st.plotly_chart(fig_primary, use_container_width=True)
 
+        # —— Right: Mean Study Duration (Overall) ——
+        with col2:
+            st.markdown(
+                "<h3 style='font-family: Arial, sans-serif; color: #0E4D64;'>Mean Study Duration</h3>",
+                unsafe_allow_html=True,
+            )
+            fig_overall = px.bar(
+                agg,
+                x="avg_overall_months",
+                y="Phases",
+                orientation="h",
+                text="Overall Label",
+                labels={"avg_overall_months": "", "Phases": ""},
+            )
+            fig_overall.update_traces(textposition="outside", marker_color="#0E4D64")
+            fig_overall.update_xaxes(
+                range=[0, common_x_max],
+                showticklabels=False,
+                showgrid=False,
+                zeroline=False,
+            )
+            fig_overall.update_yaxes(visible=False)  # hide y‐axis on the right chart
+            fig_overall.update_layout(
+                margin=dict(l=20, r=20, t=0, b=20),
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                height=300,
+            )
+            st.plotly_chart(fig_overall, use_container_width=True)
+
+        # —— Below Charts: Explanatory Bullets ——
         st.markdown(
             """
-            - Bars show **average** duration (start→completion or start→primary) per Phase.  
-            - Labels on each bar are in “X yr Y mo” (or “Y mo”) format.  
-            - Use the **Funder Type** toggle (sidebar) to switch between Industry, Academic, or Both.  
-            """
+            <ul style="font-family: Arial, sans-serif; font-size: 14px;">
+                <li>Bars show <strong>average</strong> duration (start → primary or start → completion) per Phase.</li>
+                <li>Use the <strong>Funder Type</strong> toggle above to switch between Industry or Academic.</li>
+            </ul>
+            """,
+            unsafe_allow_html=True,
         )
 
 
